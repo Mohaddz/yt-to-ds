@@ -35,7 +35,7 @@ def main(args: Optional[List[str]] = None):
     
     parser.add_argument(
         "--transcription-provider", "-tp",
-        choices=["openai", "elevenlabs"],
+        choices=["openai", "elevenlabs", "groq"],
         default="openai",
         help="Transcription provider to use"
     )
@@ -48,6 +48,11 @@ def main(args: Optional[List[str]] = None):
     parser.add_argument(
         "--elevenlabs-api-key",
         help="ElevenLabs API key (can also be set via ELEVENLABS_API_KEY environment variable)"
+    )
+    
+    parser.add_argument(
+        "--groq-api-key",
+        help="Groq API key (can also be set via GROQ_API_KEY environment variable)"
     )
     
     parser.add_argument(
@@ -111,6 +116,13 @@ def main(args: Optional[List[str]] = None):
         help="Enable verbose logging"
     )
     
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=3,
+        help="Maximum number of parallel workers for transcription (default: 3)"
+    )
+    
     # Parse arguments
     parsed_args = parser.parse_args(args)
     
@@ -128,15 +140,20 @@ def main(args: Optional[List[str]] = None):
     if parsed_args.transcription_provider == "elevenlabs" and not (parsed_args.elevenlabs_api_key or os.environ.get("ELEVENLABS_API_KEY")):
         parser.error("ElevenLabs API key is required for ElevenLabs transcription (use --elevenlabs-api-key or set ELEVENLABS_API_KEY environment variable)")
     
+    if parsed_args.transcription_provider == "groq" and not (parsed_args.groq_api_key or os.environ.get("GROQ_API_KEY")):
+        parser.error("Groq API key is required for Groq transcription (use --groq-api-key or set GROQ_API_KEY environment variable)")
+    
     # Initialize processor
     try:
         processor = YTDSProcessor(
             openai_api_key=parsed_args.openai_api_key,
             elevenlabs_api_key=parsed_args.elevenlabs_api_key,
+            groq_api_key=parsed_args.groq_api_key,
             hf_token=parsed_args.hf_token,
             ffmpeg_path=parsed_args.ffmpeg_path,
             output_dir=parsed_args.output_dir,
-            transcription_provider=parsed_args.transcription_provider
+            transcription_provider=parsed_args.transcription_provider,
+            max_workers=parsed_args.max_workers
         )
         
         # Process the YouTube videos

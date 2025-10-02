@@ -6,7 +6,8 @@ A Python tool for converting YouTube videos into transcribed audio datasets. Thi
 
 - Download audio from YouTube videos
 - Support for multiple YouTube videos in a single run
-- Transcription using OpenAI Whisper API or ElevenLabs Speech-to-Text API
+- Transcription using OpenAI Whisper API, Groq Whisper API, or ElevenLabs Speech-to-Text API
+- **Parallel processing** for faster transcription and segment creation
 - Segment audio into optimal chunks based on transcript content
 - Create a structured dataset from audio segments
 - Optional upload to Hugging Face Hub
@@ -25,7 +26,8 @@ pip install -e .
 
 - Python 3.7+
 - FFmpeg (required for audio processing)
-- OpenAI API key (for Whisper transcription)
+- OpenAI API key (for OpenAI Whisper transcription)
+- Groq API key (optional, for Groq Whisper transcription - **faster and cheaper**)
 - ElevenLabs API key (optional, for ElevenLabs transcription)
 - HuggingFace token (optional, for dataset upload)
 
@@ -41,7 +43,17 @@ processor = YTDSProcessor(
     openai_api_key="your_openai_api_key",
     hf_token="your_huggingface_token",  # Optional
     output_dir="./output",  # Optional
-    transcription_provider="openai"  # Default
+    transcription_provider="openai",  # Default
+    max_workers=3  # Parallel workers for faster processing
+)
+
+# Or initialize with Groq for transcription (faster and cheaper!)
+processor = YTDSProcessor(
+    groq_api_key="your_groq_api_key",
+    hf_token="your_huggingface_token",  # Optional
+    output_dir="./output",  # Optional
+    transcription_provider="groq",
+    max_workers=5  # Groq can handle more parallel requests
 )
 
 # Or initialize with ElevenLabs for transcription
@@ -96,8 +108,11 @@ for i, result in enumerate(results):
 # Basic usage with OpenAI (single video)
 ytds https://www.youtube.com/watch?v=example --openai-api-key YOUR_API_KEY
 
-# Process multiple videos at once
-ytds https://www.youtube.com/watch?v=example1 https://www.youtube.com/watch?v=example2 --openai-api-key YOUR_API_KEY
+# Use Groq for faster and cheaper transcription
+ytds https://www.youtube.com/watch?v=example --transcription-provider groq --groq-api-key YOUR_API_KEY
+
+# Process multiple videos at once with parallel processing
+ytds https://www.youtube.com/watch?v=example1 https://www.youtube.com/watch?v=example2 --groq-api-key YOUR_API_KEY --transcription-provider groq --max-workers 5
 
 # Use ElevenLabs instead
 ytds https://www.youtube.com/watch?v=example --transcription-provider elevenlabs --elevenlabs-api-key YOUR_API_KEY
@@ -125,11 +140,31 @@ You can use environment variables instead of passing API keys directly:
 ```bash
 # Set environment variables
 export OPENAI_API_KEY=your_openai_api_key
+export GROQ_API_KEY=your_groq_api_key
 export ELEVENLABS_API_KEY=your_elevenlabs_api_key
 export HF_TOKEN=your_huggingface_token
 
 # Then run without explicitly providing the keys
-ytds https://www.youtube.com/watch?v=example
+ytds https://www.youtube.com/watch?v=example --transcription-provider groq
+```
+
+## Performance Optimizations
+
+This tool includes several performance optimizations:
+
+1. **Parallel Chunk Transcription**: Audio chunks are transcribed simultaneously using ThreadPoolExecutor
+2. **Parallel Segment Extraction**: Audio segments are extracted in parallel using FFmpeg
+3. **Configurable Workers**: Control the level of parallelism with `--max-workers` (default: 3)
+
+### Performance Tips
+
+- **Groq**: Supports higher parallelism (recommended: `--max-workers 5-10`) and is significantly faster and cheaper than OpenAI
+- **OpenAI**: Use `--max-workers 3-5` to balance speed and API rate limits
+- **ElevenLabs**: Sequential processing to avoid rate limiting
+
+Example for maximum speed with Groq:
+```bash
+ytds https://www.youtube.com/watch?v=example --transcription-provider groq --groq-api-key YOUR_KEY --max-workers 10
 ```
 
 ## License

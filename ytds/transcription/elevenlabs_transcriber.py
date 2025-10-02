@@ -9,6 +9,8 @@ import time
 import requests
 from typing import List, Dict, Optional
 
+from tqdm import tqdm
+
 from .base import BaseTranscriber
 from ..utils import split_audio_into_chunks
 
@@ -119,7 +121,7 @@ class ElevenLabsTranscriber(BaseTranscriber):
             
             # Transcribe each chunk
             all_segments = []
-            for chunk in audio_chunks:
+            for chunk in tqdm(audio_chunks, desc="Transcribing chunks", unit="chunk"):
                 chunk_start_ms = chunk["start_ms"]
                 segments = self.transcribe_chunk(chunk["file"], chunk_start_ms)
                 all_segments.extend(segments)

@@ -18,10 +18,12 @@ class YTDSProcessor:
         self, 
         openai_api_key: str = None,
         elevenlabs_api_key: str = None,
+        groq_api_key: str = None,
         hf_token: str = None,
         ffmpeg_path: str = None,
         output_dir: str = None,
-        transcription_provider: str = "openai"
+        transcription_provider: str = "openai",
+        max_workers: int = 6
     ):
         """
         Initialize the YTDS processor.
@@ -29,20 +31,24 @@ class YTDSProcessor:
         Args:
             openai_api_key: OpenAI API key for Whisper transcription
             elevenlabs_api_key: ElevenLabs API key for transcription
+            groq_api_key: Groq API key for Whisper transcription
             hf_token: HuggingFace token for dataset upload
             ffmpeg_path: Custom path to ffmpeg binary
             output_dir: Directory to store outputs (default: temporary directory)
-            transcription_provider: Provider for transcription ("openai" or "elevenlabs")
+            transcription_provider: Provider for transcription ("openai", "elevenlabs", or "groq")
+            max_workers: Maximum number of parallel workers for transcription (default: 6)
         """
         self.openai_api_key = openai_api_key or os.environ.get("OPENAI_API_KEY")
         self.elevenlabs_api_key = elevenlabs_api_key or os.environ.get("ELEVENLABS_API_KEY")
+        self.groq_api_key = groq_api_key or os.environ.get("GROQ_API_KEY")
         self.hf_token = hf_token or os.environ.get("HF_TOKEN")
         self.ffmpeg_path = ffmpeg_path
         self.transcription_provider = transcription_provider
+        self.max_workers = max_workers
         
         # Validate provider
-        if transcription_provider not in ["openai", "elevenlabs"]:
-            raise ValueError("Transcription provider must be 'openai' or 'elevenlabs'")
+        if transcription_provider not in ["openai", "elevenlabs", "groq"]:
+            raise ValueError("Transcription provider must be 'openai', 'elevenlabs', or 'groq'")
         
         # Set up output directory
         if output_dir:
@@ -54,12 +60,16 @@ class YTDSProcessor:
             self.output_dir = self.temp_dir.name
             
         # Initialize transcription module based on provider
-        from .transcription import openai_transcriber, elevenlabs_transcriber
+        from .transcription import openai_transcriber, elevenlabs_transcriber, groq_transcriber
         
         if transcription_provider == "openai":
             if not self.openai_api_key:
                 raise ValueError("OpenAI API key is required for OpenAI transcription")
-            self.transcriber = openai_transcriber.OpenAITranscriber(self.openai_api_key)
+            self.transcriber = openai_transcriber.OpenAITranscriber(self.openai_api_key, max_workers=max_workers)
+        elif transcription_provider == "groq":
+            if not self.groq_api_key:
+                raise ValueError("Groq API key is required for Groq transcription")
+            self.transcriber = groq_transcriber.GroqTranscriber(self.groq_api_key, max_workers=max_workers)
         else:
             if not self.elevenlabs_api_key:
                 raise ValueError("ElevenLabs API key is required for ElevenLabs transcription")

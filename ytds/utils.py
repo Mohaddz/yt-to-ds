@@ -10,11 +10,13 @@ import tempfile
 import subprocess
 import math
 from typing import List, Dict, Tuple, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import yt_dlp
 from pydub import AudioSegment
 from datasets import Dataset, Features, Audio, Value
 from huggingface_hub import HfApi, login
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +207,29 @@ def download_youtube_audio(video_url: str, output_dir: str, max_minutes: int = N
     """
     os.makedirs(output_dir, exist_ok=True)
     
+    # Progress bar for download
+    download_progress = None
+    
+    def progress_hook(d):
+        nonlocal download_progress
+        if d['status'] == 'downloading':
+            if download_progress is None:
+                total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
+                download_progress = tqdm(
+                    total=total,
+                    unit='B',
+                    unit_scale=True,
+                    unit_divisor=1024,
+                    desc="Downloading audio"
+                )
+            downloaded = d.get('downloaded_bytes', 0)
+            download_progress.n = downloaded
+            download_progress.refresh()
+        elif d['status'] == 'finished':
+            if download_progress:
+                download_progress.close()
+                download_progress = None
+    
     # Configure yt-dlp options
     ydl_opts = {
         'format': 'bestaudio/best',
@@ -220,6 +245,7 @@ def download_youtube_audio(video_url: str, output_dir: str, max_minutes: int = N
             'preferredquality': '192',
         }],
         'logger': logger,
+        'progress_hooks': [progress_hook],
     }
     
     # Download the video audio
@@ -323,47 +349,91 @@ def split_audio_into_chunks(
     logger.info(f"Creating {num_chunks} chunks of {chunk_minutes} minutes each")
     
     chunks = []
-    for i in range(num_chunks):
-        chunk_start = start_minute + (i * chunk_minutes)
-        chunk_end = min(chunk_start + chunk_minutes, end_minute)
-        
-        if chunk_end <= chunk_start:
-            break
+    with tqdm(total=num_chunks, desc="Splitting audio into chunks", unit="chunk") as pbar:
+        for i in range(num_chunks):
+            chunk_start = start_minute + (i * chunk_minutes)
+            chunk_end = min(chunk_start + chunk_minutes, end_minute)
             
-        chunk_duration = chunk_end - chunk_start
+            if chunk_end <= chunk_start:
+                break
+                
+            chunk_duration = chunk_end - chunk_start
+            
+            # Output file for this chunk
+            chunk_file = os.path.join(output_dir, f"chunk_{i+1:03d}.mp3")
+            
+            # Build ffmpeg command
+            cmd = [
+                'ffmpeg',
+                '-i', audio_file,
+                '-ss', str(chunk_start * 60),  # Start time in seconds
+                '-t', str(chunk_duration * 60),  # Duration in seconds
+                '-acodec', 'libmp3lame',
+                '-q:a', '2',  # High quality
+                '-y',  # Overwrite if exists
+                chunk_file
+            ]
+            
+            # Execute command
+            try:
+                subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                
+                chunks.append({
+                    'index': i,
+                    'file': chunk_file,
+                    'start_ms': int(chunk_start * 60 * 1000),  # Start time in ms
+                    'duration_ms': int(chunk_duration * 60 * 1000),  # Duration in ms
+                })
+                
+                pbar.update(1)
+                
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Error creating chunk {i+1}: {e}")
+                logger.error(f"FFmpeg error: {e.stderr.decode('utf-8') if e.stderr else 'No error output'}")
+                raise
+    
+    return chunks
+
+
+def _extract_segment(audio_file: str, segment_data: Dict, output_dir: str, segment_index: int) -> Dict:
+    """
+    Helper function to extract a single segment using FFmpeg.
+    
+    Args:
+        audio_file: Path to the source audio file
+        segment_data: Dictionary with segment metadata
+        output_dir: Directory to store the segment
+        segment_index: Index number for the segment
         
-        # Output file for this chunk
-        chunk_file = os.path.join(output_dir, f"chunk_{i+1:03d}.mp3")
-        
-        # Build ffmpeg command
+    Returns:
+        Dictionary with segment information or None if extraction failed
+    """
+    segment_file = os.path.join(output_dir, f"segment_{segment_index:04d}.mp3")
+    
+    try:
         cmd = [
             'ffmpeg',
             '-i', audio_file,
-            '-ss', str(chunk_start * 60),  # Start time in seconds
-            '-t', str(chunk_duration * 60),  # Duration in seconds
+            '-ss', str(segment_data['start']),
+            '-t', str(segment_data['duration']),
             '-acodec', 'libmp3lame',
-            '-q:a', '2',  # High quality
-            '-y',  # Overwrite if exists
-            chunk_file
+            '-q:a', '2',
+            '-y',
+            segment_file
         ]
         
-        # Execute command
-        try:
-            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-            
-            chunks.append({
-                'index': i,
-                'file': chunk_file,
-                'start_ms': int(chunk_start * 60 * 1000),  # Start time in ms
-                'duration_ms': int(chunk_duration * 60 * 1000),  # Duration in ms
-            })
-            
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Error creating chunk {i+1}: {e}")
-            logger.error(f"FFmpeg error: {e.stderr.decode('utf-8') if e.stderr else 'No error output'}")
-            raise
-    
-    return chunks
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        
+        return {
+            'audio': segment_file,
+            'text': segment_data['text'].strip(),
+            'start': segment_data['start'],
+            'end': segment_data['end'],
+            'duration': segment_data['duration']
+        }
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Error creating segment {segment_index}: {e}")
+        return None
 
 
 def create_optimized_segments(
@@ -371,10 +441,11 @@ def create_optimized_segments(
     transcript_segments: List[Dict], 
     output_dir: str, 
     min_seconds: float = 10.0, 
-    max_seconds: float = 15.0
+    max_seconds: float = 15.0,
+    max_workers: int = 8
 ) -> List[Dict]:
     """
-    Create audio segments of desired duration from transcript segments.
+    Create audio segments of desired duration from transcript segments with parallel processing.
     
     Args:
         audio_file: Path to the audio file
@@ -382,6 +453,7 @@ def create_optimized_segments(
         output_dir: Directory to store the segments
         min_seconds: Minimum duration of segments in seconds
         max_seconds: Maximum duration of segments in seconds
+        max_workers: Maximum number of parallel workers for segment extraction
         
     Returns:
         List of optimized segments with file paths and metadata
@@ -393,20 +465,18 @@ def create_optimized_segments(
     # Sort segments by start time to ensure they're in correct order
     sorted_segments = sorted(transcript_segments, key=lambda x: x['start'])
     
-    current_segments = []
     current_text = ""
     current_start = None
     current_end = None
     current_duration = 0
     
-    dataset_items = []
-    segment_index = 0
+    segments_to_create = []
     
     # Group segments into chunks of desired length
     for segment in sorted_segments:
         segment_duration = segment['end'] - segment['start']
         
-        # Skip segments that are too short (less than 0.1 seconds)
+        # Skip segments that are too short
         if segment_duration < 0.1:
             continue
             
@@ -416,83 +486,54 @@ def create_optimized_segments(
             current_text = segment['text']
             current_end = segment['end']
             current_duration = segment_duration
-            current_segments = [segment]
         # Add to current chunk if it won't exceed max duration
         elif current_duration + segment_duration <= max_seconds:
             current_text += " " + segment['text']
             current_end = segment['end']
             current_duration += segment_duration
-            current_segments.append(segment)
         # Current chunk is full, process it if it meets min duration
         else:
-            # If current chunk meets minimum duration, process it
             if current_duration >= min_seconds:
-                segment_index += 1
-                segment_file = os.path.join(output_dir, f"segment_{segment_index:04d}.mp3")
-                
-                # Extract segment from audio file using ffmpeg
-                try:
-                    cmd = [
-                        'ffmpeg',
-                        '-i', audio_file,
-                        '-ss', str(current_start),  # Start time in seconds
-                        '-t', str(current_duration),  # Duration in seconds
-                        '-acodec', 'libmp3lame',
-                        '-q:a', '2',  # High quality
-                        '-y',  # Overwrite if exists
-                        segment_file
-                    ]
-                    
-                    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-                    
-                    # Add to dataset items
-                    dataset_items.append({
-                        'audio': segment_file,
-                        'text': current_text.strip(),
-                        'start': current_start,
-                        'end': current_end,
-                        'duration': current_duration
-                    })
-                except subprocess.CalledProcessError as e:
-                    logger.error(f"Error creating segment {segment_index}: {e}")
+                segments_to_create.append({
+                    'text': current_text,
+                    'start': current_start,
+                    'end': current_end,
+                    'duration': current_duration
+                })
             
             # Start a new chunk with current segment
             current_start = segment['start']
             current_text = segment['text']
             current_end = segment['end']
             current_duration = segment_duration
-            current_segments = [segment]
     
     # Process the last chunk if it exists and meets minimum duration
     if current_start is not None and current_duration >= min_seconds:
-        segment_index += 1
-        segment_file = os.path.join(output_dir, f"segment_{segment_index:04d}.mp3")
+        segments_to_create.append({
+            'text': current_text,
+            'start': current_start,
+            'end': current_end,
+            'duration': current_duration
+        })
+    
+    # Extract segments in parallel
+    dataset_items = []
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_segment = {
+            executor.submit(_extract_segment, audio_file, seg_data, output_dir, idx + 1): idx
+            for idx, seg_data in enumerate(segments_to_create)
+        }
         
-        # Extract segment from audio file
-        try:
-            cmd = [
-                'ffmpeg',
-                '-i', audio_file,
-                '-ss', str(current_start),  # Start time in seconds
-                '-t', str(current_duration),  # Duration in seconds
-                '-acodec', 'libmp3lame',
-                '-q:a', '2',  # High quality
-                '-y',  # Overwrite if exists
-                segment_file
-            ]
-            
-            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-            
-            # Add to dataset items
-            dataset_items.append({
-                'audio': segment_file,
-                'text': current_text.strip(),
-                'start': current_start,
-                'end': current_end,
-                'duration': current_duration
-            })
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Error creating segment {segment_index}: {e}")
+        with tqdm(total=len(segments_to_create), desc="Creating audio segments", unit="segment") as pbar:
+            for future in as_completed(future_to_segment):
+                result = future.result()
+                if result:
+                    dataset_items.append(result)
+                pbar.update(1)
+    
+    # Sort by start time to maintain order
+    dataset_items.sort(key=lambda x: x['start'])
     
     logger.info(f"Created {len(dataset_items)} optimized segments")
     return dataset_items
