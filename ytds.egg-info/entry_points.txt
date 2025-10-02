@@ -1,2 +1,0 @@
-[console_scripts]
-ytds = ytds.cli:main

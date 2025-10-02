@@ -1,6 +1,0 @@
-yt-dlp>=2023.3.4
-openai>=1.0.0
-requests>=2.28.0
-pydub>=0.25.1
-datasets>=2.10.0
-huggingface-hub>=0.12.0

@@ -167,7 +167,7 @@ class YTDSProcessor:
                 raise ValueError("Dataset name is required for HuggingFace upload")
             
             from .utils import upload_to_huggingface
-            hf_url = upload_to_huggingface(dataset_info['items'], dataset_name, self.hf_token)
+            hf_url = upload_to_huggingface(dataset_info['items'], dataset_name, self.hf_token, video_count=1)
             dataset_info['huggingface_url'] = hf_url
             logger.info(f"Dataset uploaded to HuggingFace: {hf_url}")
         
@@ -183,9 +183,9 @@ class YTDSProcessor:
         max_minutes: int = None,
         skip_minutes: int = 0,
         chunk_minutes: int = 10
-    ) -> List[Dict]:
+    ) -> Dict:
         """
-        Process multiple YouTube videos to create datasets.
+        Process multiple YouTube videos to create a combined dataset.
 
         Args:
             youtube_urls: List of YouTube video URLs
@@ -198,17 +198,22 @@ class YTDSProcessor:
             chunk_minutes: Size of chunks for processing long audio
 
         Returns:
-            List of dictionaries with information about each created dataset
+            Dictionary with information about the combined dataset
         """
-        results = []
+        from .utils import create_final_dataset
+        
+        all_segments = []
+        video_results = []
 
+        # Process each video without uploading
         for i, youtube_url in enumerate(youtube_urls):
-            logger.info(f"Processing YouTube video {i+1}/{len(youtube_urls)}: {youtube_url}")
+            logger.info(f"\n🎬 Processing video {i+1}/{len(youtube_urls)}: {youtube_url}")
 
+            # Process video WITHOUT uploading to HuggingFace
             result = self.process_youtube_video(
                 youtube_url=youtube_url,
-                dataset_name=dataset_name,
-                upload_to_hf=upload_to_hf,
+                dataset_name=None,  # Don't upload individual videos
+                upload_to_hf=False,  # Process only, don't upload yet
                 min_segment_seconds=min_segment_seconds,
                 max_segment_seconds=max_segment_seconds,
                 max_minutes=max_minutes,
@@ -216,9 +221,47 @@ class YTDSProcessor:
                 chunk_minutes=chunk_minutes
             )
 
-            results.append(result)
+            # Collect segments from this video
+            all_segments.extend(result['items'])
+            video_results.append({
+                'video_url': youtube_url,
+                'segments_count': len(result['items'])
+            })
+            
+            logger.info(f"✅ Video {i+1}/{len(youtube_urls)} complete: {len(result['items'])} segments")
 
-        return results
+        # Create combined dataset directory
+        combined_dataset_dir = os.path.join(self.output_dir, "combined_dataset")
+        os.makedirs(combined_dataset_dir, exist_ok=True)
+        
+        logger.info(f"\n📦 Creating combined dataset with {len(all_segments)} total segments from {len(youtube_urls)} videos")
+        
+        # Create final combined dataset
+        combined_dataset_info = create_final_dataset(all_segments, combined_dataset_dir)
+        combined_dataset_info['video_count'] = len(youtube_urls)
+        combined_dataset_info['videos'] = video_results
+        combined_dataset_info['total_segments'] = len(all_segments)
+
+        # Upload combined dataset to HuggingFace if requested
+        if upload_to_hf:
+            if not self.hf_token:
+                raise ValueError("HuggingFace token is required for uploading")
+            
+            if not dataset_name:
+                raise ValueError("Dataset name is required for HuggingFace upload")
+            
+            from .utils import upload_to_huggingface
+            logger.info(f"\n⬆️  Uploading combined dataset to HuggingFace: {dataset_name}")
+            hf_url = upload_to_huggingface(
+                combined_dataset_info['items'], 
+                dataset_name, 
+                self.hf_token, 
+                video_count=len(youtube_urls)
+            )
+            combined_dataset_info['huggingface_url'] = hf_url
+            logger.info(f"✅ Dataset uploaded to HuggingFace: {hf_url}")
+
+        return combined_dataset_info
 
     def __del__(self):
         # Clean up temporary directory if used

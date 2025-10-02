@@ -1,1 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual Environment
+venv/
+env/
+.venv/
+ENV/
+
+# Environment variables & API keys
+.env
+.env.local
+*.key
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project-specific
 my_dataset/
+ytds_output/
+*.mp3
+*.mp4
+*.m4a
+*.wav
+*.arrow
+
+# Keep structure but ignore contents (optional)
+!ytds_output/.gitkeep
+!my_dataset/.gitkeep

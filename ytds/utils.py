@@ -9,6 +9,7 @@ import logging
 import tempfile
 import subprocess
 import math
+import time
 from typing import List, Dict, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -171,12 +172,46 @@ def convert_to_mp3(input_file, output_file):
     logger.info(f"Converting {os.path.basename(input_file)} to MP3")
     
     try:
+        # Normalize paths for Windows
+        input_file = os.path.abspath(input_file)
+        output_file = os.path.abspath(output_file)
+        
+        # Ensure output directory exists
+        output_dir = os.path.dirname(output_file)
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Remove output file if it exists (Windows can be finicky with -y flag)
+        # Retry removal with delays to handle Windows file locking
+        if os.path.exists(output_file):
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    os.remove(output_file)
+                    logger.debug(f"Successfully removed existing output file: {output_file}")
+                    break
+                except PermissionError as e:
+                    if attempt < max_retries - 1:
+                        logger.warning(f"File locked, retrying removal in 0.5s (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(0.5)
+                    else:
+                        logger.error(f"Failed to remove locked file after {max_retries} attempts: {output_file}")
+                        raise RuntimeError(f"Cannot remove locked output file: {output_file}. Please close any programs using this file.") from e
+                except Exception as e:
+                    logger.warning(f"Could not remove existing file: {e}")
+                    break
+        
+        # On Windows, convert backslashes to forward slashes for ffmpeg
+        ffmpeg_input = input_file.replace('\\', '/') if os.name == 'nt' else input_file
+        ffmpeg_output = output_file.replace('\\', '/') if os.name == 'nt' else output_file
+        
         # Use ffmpeg to convert to MP3
         cmd = [
-            'ffmpeg', '-i', input_file, 
-            '-codec:a', 'libmp3lame', '-qscale:a', '2',  # High quality MP3
+            'ffmpeg',
+            '-i', ffmpeg_input, 
+            '-codec:a', 'libmp3lame',
+            '-qscale:a', '2',  # High quality MP3
             '-y',  # Overwrite output file if it exists
-            output_file
+            ffmpeg_output
         ]
         
         process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
@@ -184,6 +219,10 @@ def convert_to_mp3(input_file, output_file):
         if process.returncode != 0:
             logger.error(f"Error converting to MP3: {process.stderr.decode('utf-8')}")
             raise RuntimeError(f"Failed to convert {input_file} to MP3")
+        
+        # Verify the output file was created
+        if not os.path.exists(output_file):
+            raise RuntimeError(f"Output file was not created: {output_file}")
             
         return output_file
         
@@ -206,6 +245,34 @@ def download_youtube_audio(video_url: str, output_dir: str, max_minutes: int = N
         Path to the downloaded audio file
     """
     os.makedirs(output_dir, exist_ok=True)
+    
+    # Clean up old audio files from previous downloads to prevent file locking issues on Windows
+    if os.path.exists(output_dir):
+        files_to_clean = [f for f in os.listdir(output_dir) if f.endswith(('.m4a', '.mp3', '.webm', '.opus'))]
+        if files_to_clean:
+            logger.info(f"Cleaning up {len(files_to_clean)} old audio file(s) from previous run...")
+        
+        for file in files_to_clean:
+            file_path = os.path.join(output_dir, file)
+            max_retries = 5  # Increased retries for Windows file locking
+            for attempt in range(max_retries):
+                try:
+                    os.remove(file_path)
+                    logger.info(f"✓ Removed old audio file: {file}")
+                    break
+                except PermissionError:
+                    if attempt < max_retries - 1:
+                        wait_time = 1.0  # Increased wait time
+                        logger.warning(f"⚠ File {file} is locked, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(wait_time)
+                    else:
+                        logger.error(f"✗ Could not remove locked file {file} after {max_retries} attempts")
+                        logger.error(f"  Please manually delete: {file_path}")
+                        logger.error(f"  Or close any programs that might be using it (Windows Explorer, media players, etc.)")
+                        raise RuntimeError(f"Cannot proceed: {file} is locked by another process. Please close all programs using this file and try again.")
+                except Exception as e:
+                    logger.warning(f"Could not remove {file}: {e}")
+                    break
     
     # Progress bar for download
     download_progress = None
@@ -231,9 +298,10 @@ def download_youtube_audio(video_url: str, output_dir: str, max_minutes: int = N
                 download_progress = None
     
     # Configure yt-dlp options
+    # Use video ID in filename to avoid conflicts when multiple videos have similar titles
     ydl_opts = {
         'format': 'bestaudio/best',
-        'outtmpl': os.path.join(output_dir, '%(title)s.%(ext)s'),
+        'outtmpl': os.path.join(output_dir, '%(id)s_%(title)s.%(ext)s'),  # Include video ID for uniqueness
         'noplaylist': True,
         'quiet': False,
         'no_warnings': False,
@@ -253,17 +321,23 @@ def download_youtube_audio(video_url: str, output_dir: str, max_minutes: int = N
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             logger.info(f"Downloading audio from: {video_url}")
             info = ydl.extract_info(video_url, download=True)
+            video_id = info.get('id', 'unknown')
             title = info.get('title', 'video')
             
-            # Clean filename
+            # Clean filename - now includes video ID for uniqueness
             clean_title = re.sub(r'[^\w\-_\. ]', '_', title)
-            downloaded_file = os.path.join(output_dir, f"{clean_title}.m4a")
+            downloaded_file = os.path.join(output_dir, f"{video_id}_{clean_title}.m4a")
             
             if not os.path.exists(downloaded_file):
-                # Try alternative filename
-                potential_files = [f for f in os.listdir(output_dir) if f.endswith('.m4a')]
+                # Try to find file by video ID prefix
+                potential_files = [f for f in os.listdir(output_dir) if f.startswith(video_id) and f.endswith('.m4a')]
                 if potential_files:
                     downloaded_file = os.path.join(output_dir, potential_files[0])
+                else:
+                    # Fallback: find any m4a file (for backward compatibility)
+                    potential_files = [f for f in os.listdir(output_dir) if f.endswith('.m4a')]
+                    if potential_files:
+                        downloaded_file = os.path.join(output_dir, potential_files[0])
             
             # Apply time limits if specified
             if max_minutes is not None or skip_minutes > 0:
@@ -272,8 +346,12 @@ def download_youtube_audio(video_url: str, output_dir: str, max_minutes: int = N
                 # Create a trimmed version
                 trimmed_file = os.path.join(output_dir, "trimmed_audio.m4a")
                 
+                # Convert paths for ffmpeg on Windows
+                ffmpeg_input = downloaded_file.replace('\\', '/') if os.name == 'nt' else downloaded_file
+                ffmpeg_output = trimmed_file.replace('\\', '/') if os.name == 'nt' else trimmed_file
+                
                 # Build ffmpeg command for trimming
-                cmd = ['ffmpeg', '-i', downloaded_file]
+                cmd = ['ffmpeg', '-i', ffmpeg_input]
                 
                 # Add seek option if skipping from start
                 if skip_minutes > 0:
@@ -284,7 +362,7 @@ def download_youtube_audio(video_url: str, output_dir: str, max_minutes: int = N
                     cmd.extend(['-t', f'{max_minutes*60}'])
                 
                 # Output file options
-                cmd.extend(['-c', 'copy', '-y', trimmed_file])
+                cmd.extend(['-c', 'copy', '-y', ffmpeg_output])
                 
                 # Run the command
                 subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
@@ -362,16 +440,20 @@ def split_audio_into_chunks(
             # Output file for this chunk
             chunk_file = os.path.join(output_dir, f"chunk_{i+1:03d}.mp3")
             
+            # Convert paths for ffmpeg on Windows
+            ffmpeg_input = audio_file.replace('\\', '/') if os.name == 'nt' else audio_file
+            ffmpeg_output = chunk_file.replace('\\', '/') if os.name == 'nt' else chunk_file
+            
             # Build ffmpeg command
             cmd = [
                 'ffmpeg',
-                '-i', audio_file,
+                '-i', ffmpeg_input,
                 '-ss', str(chunk_start * 60),  # Start time in seconds
                 '-t', str(chunk_duration * 60),  # Duration in seconds
                 '-acodec', 'libmp3lame',
                 '-q:a', '2',  # High quality
                 '-y',  # Overwrite if exists
-                chunk_file
+                ffmpeg_output
             ]
             
             # Execute command
@@ -411,15 +493,19 @@ def _extract_segment(audio_file: str, segment_data: Dict, output_dir: str, segme
     segment_file = os.path.join(output_dir, f"segment_{segment_index:04d}.mp3")
     
     try:
+        # Convert paths for ffmpeg on Windows
+        ffmpeg_input = audio_file.replace('\\', '/') if os.name == 'nt' else audio_file
+        ffmpeg_output = segment_file.replace('\\', '/') if os.name == 'nt' else segment_file
+        
         cmd = [
             'ffmpeg',
-            '-i', audio_file,
+            '-i', ffmpeg_input,
             '-ss', str(segment_data['start']),
             '-t', str(segment_data['duration']),
             '-acodec', 'libmp3lame',
             '-q:a', '2',
             '-y',
-            segment_file
+            ffmpeg_output
         ]
         
         subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
@@ -603,14 +689,140 @@ def create_final_dataset(segments: List[Dict], output_dir: str) -> Dict:
     }
 
 
-def upload_to_huggingface(dataset_items: List[Dict], dataset_name: str, hf_token: str) -> str:
+def create_dataset_readme(dataset_items: List[Dict], dataset_name: str, video_count: int = 1) -> str:
     """
-    Upload dataset to Hugging Face.
+    Create a README.md content for the HuggingFace dataset.
+    
+    Args:
+        dataset_items: List of dataset items
+        dataset_name: Name of the dataset on HuggingFace
+        video_count: Number of source videos
+        
+    Returns:
+        README.md content as string
+    """
+    # Calculate statistics
+    total_duration_seconds = sum(item['duration'] for item in dataset_items)
+    total_hours = total_duration_seconds / 3600
+    total_minutes = total_duration_seconds / 60
+    num_segments = len(dataset_items)
+    
+    avg_segment_duration = total_duration_seconds / num_segments if num_segments > 0 else 0
+    
+    # Detect language from text samples (simple heuristic)
+    sample_texts = ' '.join([item['text'][:100] for item in dataset_items[:5]])
+    language = "Unknown"
+    if any(ord(char) > 0x0600 and ord(char) < 0x06FF for char in sample_texts):
+        language = "Arabic (ar)"
+    elif all(ord(char) < 128 for char in sample_texts.replace(' ', '')):
+        language = "English (en)"
+    
+    readme_content = f"""---
+language:
+- {language.split('(')[-1].strip(')') if '(' in language else 'unknown'}
+license: cc-by-4.0
+task_categories:
+- automatic-speech-recognition
+pretty_name: Audio Transcription Dataset
+size_categories:
+- {_get_size_category(num_segments)}
+---
+
+# Audio Transcription Dataset
+
+This dataset was automatically generated using [yt-to-ds](https://github.com/yourusername/yt-to-ds) for speech recognition and audio transcription tasks.
+
+## Dataset Statistics
+
+- **Total Audio Duration**: {total_hours:.2f} hours ({total_minutes:.1f} minutes)
+- **Number of Segments**: {num_segments:,}
+- **Source Videos**: {video_count}
+- **Average Segment Length**: {avg_segment_duration:.1f} seconds
+- **Language**: {language}
+
+## Dataset Structure
+
+Each example in the dataset contains:
+
+- `audio`: Audio file (MP3 format)
+- `text`: Transcribed text
+- `start_time`: Start time in the original audio (seconds)
+- `end_time`: End time in the original audio (seconds)
+- `duration`: Duration of the segment (seconds)
+
+## Usage
+
+```python
+from datasets import load_dataset
+
+# Load the dataset
+dataset = load_dataset("{dataset_name}")
+
+# Access an example
+example = dataset["train"][0]
+print(example["text"])
+# Play audio
+from IPython.display import Audio
+Audio(example["audio"]["array"], rate=example["audio"]["sampling_rate"])
+```
+
+## Dataset Creation
+
+This dataset was created by:
+1. Downloading audio from YouTube videos
+2. Transcribing using Whisper API (OpenAI/Groq)
+3. Segmenting into {avg_segment_duration:.0f}-second chunks
+4. Aligning transcriptions with audio segments
+
+## Citation
+
+If you use this dataset, please cite:
+
+```bibtex
+@misc{{audio_transcription_dataset,
+  title={{Audio Transcription Dataset}},
+  author={{Generated using yt-to-ds}},
+  year={{2025}},
+  publisher={{Hugging Face}},
+}}
+```
+
+## License
+
+This dataset is released under the CC-BY-4.0 license.
+"""
+    
+    return readme_content
+
+
+def _get_size_category(num_segments: int) -> str:
+    """Get HuggingFace size category based on number of segments."""
+    if num_segments < 100:
+        return "n<1K"
+    elif num_segments < 1000:
+        return "1K<n<10K"
+    elif num_segments < 10000:
+        return "10K<n<100K"
+    elif num_segments < 100000:
+        return "100K<n<1M"
+    else:
+        return "n>1M"
+
+
+def upload_to_huggingface(
+    dataset_items: List[Dict], 
+    dataset_name: str, 
+    hf_token: str,
+    video_count: int = 1
+) -> str:
+    """
+    Upload dataset to Hugging Face with auto-generated README.
     
     Args:
         dataset_items: List of dataset items
         dataset_name: Name of the dataset on Hugging Face
         hf_token: Hugging Face token
+        video_count: Number of source videos
         
     Returns:
         URL of the uploaded dataset
@@ -632,7 +844,35 @@ def upload_to_huggingface(dataset_items: List[Dict], dataset_name: str, hf_token
     # Login to Hugging Face
     login(token=hf_token)
     
-    # Push to Hugging Face
+    # Create README content
+    readme_content = create_dataset_readme(dataset_items, dataset_name, video_count)
+    
+    # Push to Hugging Face with README
     repo_url = hf_dataset.push_to_hub(dataset_name, token=hf_token)
+    
+    # Upload README separately using HfApi
+    try:
+        api = HfApi()
+        
+        # Create temporary README file
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False, encoding='utf-8') as f:
+            f.write(readme_content)
+            readme_path = f.name
+        
+        # Upload README to the dataset repo
+        api.upload_file(
+            path_or_fileobj=readme_path,
+            path_in_repo="README.md",
+            repo_id=dataset_name,
+            repo_type="dataset",
+            token=hf_token
+        )
+        
+        # Clean up temporary file
+        os.unlink(readme_path)
+        
+        logger.info("✅ README.md uploaded to HuggingFace dataset")
+    except Exception as e:
+        logger.warning(f"Could not upload README to HuggingFace: {e}")
     
     return repo_url
