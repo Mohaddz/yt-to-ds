@@ -157,14 +157,11 @@ def main(args: Optional[List[str]] = None):
         )
         
         # Process the YouTube videos
-        total_segments = 0
-        results = []
-
-        for i, youtube_url in enumerate(parsed_args.youtube_urls):
-            print(f"\n🎬 Processing video {i+1}/{len(parsed_args.youtube_urls)}: {youtube_url}")
-
+        if len(parsed_args.youtube_urls) == 1:
+            # Single video processing
+            print(f"\n🎬 Processing single video: {parsed_args.youtube_urls[0]}")
             result = processor.process_youtube_video(
-                youtube_url=youtube_url,
+                youtube_url=parsed_args.youtube_urls[0],
                 dataset_name=parsed_args.dataset_name,
                 upload_to_hf=parsed_args.upload_to_hf,
                 min_segment_seconds=parsed_args.min_segment_seconds,
@@ -174,21 +171,40 @@ def main(args: Optional[List[str]] = None):
                 chunk_minutes=parsed_args.chunk_minutes
             )
 
-            results.append(result)
-            total_segments += len(result['items'])
-
-            print(f"✅ Video {i+1} complete! Segments: {len(result['items'])}")
+            print(f"\n✅ Video processed! Segments: {len(result['items'])}")
             print(f"   Dataset directory: {os.path.abspath(result['dataset_dir'])}")
 
             if parsed_args.upload_to_hf and 'huggingface_url' in result:
                 print(f"   HuggingFace dataset URL: {result['huggingface_url']}")
+        
+        else:
+            # Multiple videos processing - merge all into one dataset
+            print(f"\n🎬 Processing {len(parsed_args.youtube_urls)} videos...")
+            print("   All videos will be merged into a single dataset")
+            
+            result = processor.process_youtube_videos(
+                youtube_urls=parsed_args.youtube_urls,
+                dataset_name=parsed_args.dataset_name,
+                upload_to_hf=parsed_args.upload_to_hf,
+                min_segment_seconds=parsed_args.min_segment_seconds,
+                max_segment_seconds=parsed_args.max_segment_seconds,
+                max_minutes=parsed_args.max_minutes,
+                skip_minutes=parsed_args.skip_minutes,
+                chunk_minutes=parsed_args.chunk_minutes
+            )
 
-        print("\n🎉 All videos processed!")
-        print(f"📊 Total segments created across all videos: {total_segments}")
+            print("\n🎉 All videos processed and merged!")
+            print(f"📊 Total segments: {result['total_segments']} from {result['video_count']} videos")
+            
+            # Show per-video breakdown
+            print("\n   Per-video breakdown:")
+            for i, video_info in enumerate(result['videos']):
+                print(f"   Video {i+1}: {video_info['segments_count']} segments")
+            
+            print(f"\n   Combined dataset directory: {os.path.abspath(result['dataset_dir'])}")
 
-        # Show summary of all results
-        for i, result in enumerate(results):
-            print(f"   Video {i+1}: {len(result['items'])} segments")
+            if parsed_args.upload_to_hf and 'huggingface_url' in result:
+                print(f"   HuggingFace dataset URL: {result['huggingface_url']}")
         
     except Exception as e:
         logging.error(f"Error during processing: {e}")
